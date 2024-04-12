@@ -227,7 +227,7 @@ def main(args):
     start_time = time.time()
     max_accuracy = 0.0
 
-    learner = maml_learner(maml, dataset, ways=1, args=args)
+    learner = maml_learner(maml, dataset, ways=1, args=args, optimizer=optimizer, loss_scaler=loss_scaler)
     save_path = args.output_dir
     learner.train(save_path, shots=1)
 
