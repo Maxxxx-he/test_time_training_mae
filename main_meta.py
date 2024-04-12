@@ -29,6 +29,7 @@ from util.misc import NativeScalerWithGradNormCount as NativeScaler
 from util.lars import LARS
 from util.crop import RandomResizedCrop
 import models_mae_shared
+from engine_meta import maml_learner
 
 
 def get_args_parser():
@@ -51,7 +52,7 @@ def get_args_parser():
     parser.add_argument('--weight_decay', type=float, default=0,
                         help='weight decay (default: 0 for linear probe following MoCo v1)')
 
-    parser.add_argument('--lr', type=float, default=None, metavar='LR',
+    parser.add_argument('--lr', type=float, default=0.001, metavar='LR',
                         help='learning rate (absolute lr)')
     parser.add_argument('--blr', type=float, default=0.1, metavar='LR',
                         help='base learning rate: absolute_lr = base_lr * total_batch_size / 256')
@@ -61,6 +62,8 @@ def get_args_parser():
 
     parser.add_argument('--warmup_epochs', type=int, default=5, metavar='N',
                         help='epochs to warmup LR')
+    parser.add_argument('--resume_model', default='', required=True, help='resume from checkpoint')
+    parser.add_argument('--resume_finetune', default='', required=True, help='resume from checkpoint')
 
     # Dataset parameters
     parser.add_argument('--data_path', default='/home/h_haoy/Myproject/Pcam', type=str,
@@ -91,10 +94,6 @@ def get_args_parser():
 
     parser.add_argument('--head_type', default='vit_head',
                         help='Head type - linear or vit_head')
-    # Meta
-    parser.add_argument('--meta', default='/home/h_haoy/test_time_training_mae/myfinetune2/checkpoint-final.pth',
-                        help='finetune from checkpoint')
-
     # distributed training parameters
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
@@ -106,30 +105,65 @@ def get_args_parser():
     return parser
 
 
+def load_model(args, num_classes):
+    classifier_embed_dim = 768
+    classifier_depth = 12
+    classifier_num_heads = 12
+
+    model = models_mae_shared.__dict__[args.model](num_classes=num_classes, head_type=args.head_type,
+                                                   norm_pix_loss=args.norm_pix_loss,
+                                                   classifier_depth=classifier_depth,
+                                                   classifier_embed_dim=classifier_embed_dim,
+                                                   classifier_num_heads=classifier_num_heads,
+                                                   rotation_prediction=False)
+
+    model_checkpoint = torch.load(args.resume_model, map_location='cpu')
+    head_checkpoint = torch.load(args.resume_finetune, map_location='cpu')
+
+    # print("Load classifier checkpoint from: %s" % head_checkpoint)
+    print("Load classifier checkpoint")
+    for key in head_checkpoint['model']:
+        if key.startswith('classifier'):
+            model_checkpoint['model'][key] = head_checkpoint['model'][key]
+
+    # print("Load pre-trained checkpoint from: %s" % model_checkpoint)
+    print("Load pretrain checkpoint")
+    checkpoint_model = model_checkpoint['model']
+    for k in list(checkpoint_model.keys()):
+        if k.startswith('bn') or k.startswith('head'):
+            print(f"Removing key {k} from pretrained checkpoint")
+            del checkpoint_model[k]
+    msg = model.load_state_dict(checkpoint_model)
+    print(msg)
+
+    param_groups = optim_factory.add_weight_decay(model, args.weight_decay)
+    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
+    print(optimizer)
+    loss_scaler = NativeScaler()
+    return model, optimizer, loss_scaler
+
+
 def main(args):
     if torch.cuda.is_available():
         print('__CUDNN VERSION:', torch.backends.cudnn.version())
         print('__Number CUDA Devices:', torch.cuda.device_count())
         print('__CUDA Device Name:', torch.cuda.get_device_name(0))
         print('__CUDA Device Total Memory [GB]:', torch.cuda.get_device_properties(0).total_memory / 1e9)
-
     print("-------------------")
 
-    misc.init_distributed_mode(args)
+    # misc.init_distributed_mode(args)
 
     print('job dir: {}'.format(os.path.dirname(os.path.realpath(__file__))))
     print("{}".format(args).replace(', ', ',\n'))
     print("-----------")
-    device = torch.device(args.device)
 
+    device = torch.device(args.device)
     # fix the seed for reproducibility
     seed = args.seed + misc.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     cudnn.benchmark = True
-
-    ##1 WAY 1 SHOT : 1 WAY: 1 CLASS, 1 SHOT: EACH CLASS HAS 1 IMAGE
 
     transform_train = transforms.Compose([
         transforms.Resize((224, 224)),
@@ -138,76 +172,67 @@ def main(args):
 
     dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'testttt'), transform=transform_train)
 
+    ##1 WAY 1 SHOT : 1 WAY: 1 CLASS, 1 SHOT: EACH CLASS HAS 1 IMAGE
+    ### maml
     dataset = l2l.data.MetaDataset(dataset_train)
-    print(dataset)
+    # print(dataset)
     # task = l2l.data.Taskset(dataset=dataset_train, task_transforms=[l2l.data.transforms.NWays(dataset, n=1),
     #                                                                 l2l.data.transforms.KShots(dataset, k=1),
     #                                                                 l2l.data.transforms.LoadData(dataset)])
     # print(task)
-    train_tasks = l2l.data.TaskDataset(dataset, task_transforms=[l2l.data.transforms.NWays(dataset, n=1),
-                                                                 l2l.data.transforms.KShots(dataset, k=1),
-                                                                 l2l.data.transforms.LoadData(dataset)], num_tasks=4)
-    print(train_tasks)
-    #num_tasks  num of task to generate
-    task = train_tasks.sample()
-    data, labels = task
+
+    # train_tasks = l2l.data.TaskDataset(dataset, task_transforms=[l2l.data.transforms.NWays(dataset, n=1),
+    #                                                              l2l.data.transforms.KShots(dataset, k=1),
+    #                                                              l2l.data.transforms.LoadData(dataset)], num_tasks=4)
+    # print(train_tasks)
+    # num_tasks  num of task to generate
+    # task = train_tasks.sample()
+    # data, labels = task
     # print(data.shape, labels.shape) #(1,3,224,224) (1)
     # print(data)
     # print(labels)
-    num_classes = 2
+    ###
 
-    model = models_mae_shared.__dict__[args.model](
-        num_classes=num_classes,
-        img_size=args.input_size,
-        # no_decoder=True,  #
-        head_type=args.head_type,  #
-        classifier_depth=args.classifier_depth,
-        norm_pix_loss=args.norm_pix_loss,  #
-        # drop_path_rate=args.drop_path,  #
-    )
+    # loading model##########
+    # if True:
+    #     checkpoint = torch.load(args.meta, map_location='cpu')
+    #
+    #     print("Load pre-trained checkpoint from: %s" % args.meta)
+    #     checkpoint_model = checkpoint['model']
+    #     # interpolate position embedding
+    #     interpolate_pos_embed(model, checkpoint_model)
+    #
+    #     # load pre-trained model
+    #     msg = model.load_state_dict(checkpoint_model, strict=False)
+    #     print(msg)
+    #     print("-----------------------------")
+    # loading finish##########
 
+    model, optimizer, loss_scaler = load_model(args, 2)
+
+    # test
     maml = l2l.algorithms.MAML(model, lr=0.01)
-    # print(maml)
-
-    if args.meta and not args.eval:
-        checkpoint = torch.load(args.meta, map_location='cpu')
-
-        print("Load pre-trained checkpoint from: %s" % args.meta)
-        checkpoint_model = checkpoint['model']
-        # interpolate position embedding
-        interpolate_pos_embed(model, checkpoint_model)
-
-        # load pre-trained model
-        msg = model.load_state_dict(checkpoint_model, strict=False)
-        print(msg)
-        print("-----------------------------")
+    print(maml)
 
     for name, p in model.named_parameters():
         p.requires_grad = True
 
     model.to(device)
 
-    model_without_ddp = model
     n_parameters = sum(p.numel() for p in model.parameters() if p.requires_grad)
-
-    print("Model = %s" % str(model_without_ddp))
     print('number of params (M): %.2f' % (n_parameters / 1.e6))
 
-    if args.distributed:
-        model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu],
-                                                          find_unused_parameters=True)  ##find_unused_parameters=True
-        model_without_ddp = model.module
-
-    param_groups = optim_factory.add_weight_decay(model_without_ddp, args.weight_decay)
-    optimizer = torch.optim.AdamW(param_groups, lr=args.lr, betas=(0.9, 0.95))
-    print(optimizer)
-    loss_scaler = NativeScaler()
-    misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
+    # misc.load_model(args=args, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
 
     start_time = time.time()
     max_accuracy = 0.0
 
-    #meta_learning
+    learner = maml_learner(maml, dataset, ways=1, args=args)
+    save_path = args.output_dir
+    learner.train(save_path, shots=1)
+
+
+# meta_learning
 
 
 if __name__ == '__main__':
