@@ -28,7 +28,7 @@ from torchvision import datasets
 import glob
 import util.misc as misc
 import models_mae_shared
-from engine_test_time import train_on_test, get_prameters_from_args
+from engine_ttt import train_on_test, get_prameters_from_args
 from data import tt_image_folder
 from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
@@ -180,20 +180,13 @@ def main(args):
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    if not args.single_crop:
-        transform_train = transforms.Compose([
-            # transforms.RandomResizedCrop(args.input_size, scale=(0.2, 1.0), interpolation=3),  # 3 is bicubic
-            # transforms.RandomHorizontalFlip(),
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    else:
-        transform_train = transforms.Compose([
-            # transforms.Resize(256, interpolation=3),
-            # transforms.CenterCrop(args.input_size),
-            transforms.Resize((224, 224)),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+
+    transform_train = transforms.Compose([
+        # transforms.Resize(256, interpolation=3),
+        # transforms.CenterCrop(args.input_size),
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
 
     data_path = args.data_path
 
@@ -201,9 +194,33 @@ def main(args):
                                               transform=transform_train, download=False)
     dataset_val = torchvision.datasets.PCAM(root="/home/h_haoy/Myproject/Myprojectpcam/Pcam", split='test',
                                             transform=transform_val, download=False)
-
+    # dataset_train = MyPcamDarasets(pcam, transform=transform_train, minimizer=None,
+    #                                batch_size=args.batch_size,
+    #                                steps_per_example=args.steps_per_example * args.accum_iter,
+    #                                single_crop=args.single_crop, start_index=max_known_file + 1)
+    # dataset_val = MyPcamDarasets(pcam, transform=transform_train, minimizer=None,
+    #                              batch_size=args.batch_size, steps_per_example=args.steps_per_example * args.accum_iter,
+    #                              single_crop=args.single_crop, start_index=max_known_file + 1)
     num_classes = 2
 
+    sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+
+    data_loader_train = torch.utils.data.DataLoader(
+        dataset_train, sampler=sampler_train,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=True,
+    )
+    data_loader_val = torch.utils.data.DataLoader(
+        dataset_val, sampler=sampler_val,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False
+    )
+#args.batch_size
     # define the model
     model, optimizer, scalar = load_combined_model(args, num_classes)
 
@@ -223,8 +240,14 @@ def main(args):
     print("effective batch size: %d" % eff_batch_size)
 
     start_time = time.time()
+    print("length", len(dataset_val))
+    for data_iter_step, (samples, labels) in enumerate(data_loader_train):
+        if data_iter_step == 1:
+            print("shape: ", samples.shape)
+
     test_stats = train_on_test(
-        model, optimizer, scalar, dataset_train, dataset_val,
+        model, optimizer, scalar, dataset_train, dataset_val, len(dataset_val),
+        transform_train,
         device,
         log_writer=None,
         args=args,
