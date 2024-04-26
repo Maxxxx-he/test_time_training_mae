@@ -164,15 +164,15 @@ def train_on_test(base_model: torch.nn.Module,
                     all_results.append(acc1)
                     model.train()
         if index % 20 == 1:
-            print('step: {}, before acc {}'.format(index, np.mean(before_results[-1])))
-            print('step: {}, acc {} rec-loss {}'.format(index, np.mean(all_results[-1]), loss_value))
-        if index % 500 == 499 or (index == dataset_len - 1):
-            with open(os.path.join(args.output_dir, f'results_{index}.npy'), 'wb') as f:
-                np.save(f, np.array(all_results))
-            with open(os.path.join(args.output_dir, f'losses_{index}.npy'), 'wb') as f:
-                np.save(f, np.array(all_losses))
-            all_results = [list() for i in range(args.steps_per_example)]
-            all_losses = [list() for i in range(args.steps_per_example)]
+            print('step: {}, before acc {}'.format(index, np.mean(before_results[-20:])))
+            print('step: {}, acc {} rec-loss {}'.format(index, np.mean(all_results[-20:]), loss_value))
+        # if index % 500 == 499 or (index == dataset_len - 1):
+        #     with open(os.path.join(args.output_dir, f'results_{index}.npy'), 'wb') as f:
+        #         np.save(f, np.array(all_results))
+        #     with open(os.path.join(args.output_dir, f'losses_{index}.npy'), 'wb') as f:
+        #         np.save(f, np.array(all_losses))
+        #     all_results = [list() for i in range(args.steps_per_example)]
+        #     all_losses = [list() for i in range(args.steps_per_example)]
         model, optimizer, loss_scaler = _reinitialize_model(base_model, base_optimizer, base_scalar, clone_model, args,
                                                             device)
     save_accuracy_results(args)
