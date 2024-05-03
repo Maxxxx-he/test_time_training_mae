@@ -20,6 +20,18 @@ from einops import repeat
 import tqdm
 import os.path
 
+import math
+import sys
+from typing import Iterable, Optional
+
+import torch
+
+from timm.data import Mixup
+from timm.utils import accuracy
+
+import util.misc as misc
+import util.lr_sched as lr_sched
+
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE testing.', add_help=False)
     # Model parameters
@@ -54,9 +66,8 @@ def get_args_parser():
     parser.add_argument('--head_type', default='linear',
                         help='Head type - linear or vit_head')
     parser.add_argument('--num_workers', default=10, type=int)
-    
-    return parser
 
+    return parser
 
 def main(args):
     transform_val = transforms.Compose([
@@ -67,57 +78,60 @@ def main(args):
         transforms.Normalize(mean=[0.676, 0.566, 0.664], std=[0.227, 0.253, 0.217])])
     # dataset_val = datasets.ImageFolder(args.data_path, transform=transform_val)
     dataset_val = torchvision.datasets.PCAM(root="/home/h_haoy/Myproject/Myprojectpcam/Pcam", split='test',
-                                              transform=transform_val, download=False)
-    #dataset_val = datasets.ImageFolder('/home/h_haoy/Myproject/Pcam/testttt', transform=transform_val)
+                                            transform=transform_val, download=False)
+    # dataset_val = datasets.ImageFolder('/home/h_haoy/Myproject/Pcam/testttt', transform=transform_val)
     classes = 2
 
-    
-    print(f'Using dataset {args.data_path} with {len(dataset_val)}') 
+    sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+    data_loader_val = torch.utils.data.DataLoader(
+        dataset_val, sampler=sampler_val,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=False
+    )
+
+    print(f'Using dataset {args.data_path} with {len(dataset_val)}')
     model, _, _ = load_combined_model(args, classes)
     _ = model.to(args.device)
-    all_acc = []
-    all_losses = []
-    model.eval()
-    data_len = len(dataset_val)
-    for index in range(data_len):
-        # Get the samples:
-        current_idx = index
-        samples, labels = dataset_val[current_idx]
-        samples = samples.to(args.device, non_blocking=True).unsqueeze(0)
-        labels = torch.LongTensor([labels]).to(args.device, non_blocking=True)
-        with torch.no_grad():
-            loss_dict, _, _, pred = model(samples, target=labels, mask_ratio=0)
-            #print(pred)
-            acc1 = (stats.mode(pred.argmax(axis=1).detach().cpu().numpy()).mode[0] == labels[0].cpu().detach().numpy()) * 100.
-        all_acc.append(acc1)
-        all_losses.append(float(loss_dict['classification'].detach().cpu().numpy()))
-        # if data_iter_step % 50 == 1:
-        #     print('step: {}, before {}'.format(data_iter_step, np.mean(before_results[-1])))
-        #     print('step: {}, acc {} rec-loss {}'.format(data_iter_step, np.mean(all_results[-1]), loss_value))
-        mask_ratio = args.mask_ratio
-        # samples, _ = train_data
-        targets_rot, samples_rot = None, None
-        loss_dict, _, _, _ = model(test_samples, target=None, mask_ratio=mask_ratio)
-        loss = torch.stack([loss_dict[l] for l in loss_dict]).sum()
-        loss_value = loss.item()
-        # loss /= accum_iter
-        if not math.isfinite(loss_value):
-            print("Loss is {}, stopping training".format(loss_value))
-            sys.exit(1)
-        loss_scaler(loss, optimizer, parameters=model.parameters(),
-                    update_grad=(1 + 1) % 1 == 0)
+    metric_logger = misc.MetricLogger(delimiter="  ")
+    header = 'Test:'
 
-        if index % 50 == 1:
-            print("ep:, acc", index, np.mean(all_acc[-1000:]))
-            print("loss", np.mean(all_losses[-1000:]))
+    # switch to evaluation mode
+    model.eval()
+    all_acc = []
+    all_acc2 = []
+    for batch in metric_logger.log_every(data_loader, 10, header):
+        images = batch[0]
+        target = batch[-1]
+        images = images.to(device, non_blocking=True)
+        target = target.to(device, non_blocking=True)
+
+        # compute output
+        with torch.cuda.amp.autocast():
+            loss_dict, _, _, output = model(images, target, mask_ratio=0)
+
+        acc1, acc5 = accuracy(output, target, topk=(1, 2))
+
+        batch_size = images.shape[0]
+        metric_logger.update(loss=loss_dict['classification'].item())
+        metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
+        metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+        all_acc.append(acc1.item())
+        all_acc2.append(acc5.item())
+    # gather the stats from all processes
+    metric_logger.synchronize_between_processes()
+    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
+          .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
+    states = {k: meter.global_avg for k, meter in metric_logger.meters.items()}
+    print(f"Accuracy of the network on the {len(dataset_val)} test images: {states['acc1']:.1f}%")
+    print(np.mean(all_acc))
     print('Saving to', os.path.join(args.output_dir, 'accuracy.txt'))
     with open(os.path.join(args.output_dir, 'accuracy.txt'), 'a') as f:
         f.write(f'{str(args)}\n')
-        f.write(f'{np.mean(all_acc)} {np.mean(all_losses)}\n')
-    with open(os.path.join(args.output_dir, 'accuracy.npy'), 'wb') as f:
-        np.save(f, np.array(all_acc))
-        
-    
+        f.write(f'{np.mean(all_acc)}\n')
+
+
 if __name__ == '__main__':
     args = get_args_parser()
     args = args.parse_args()

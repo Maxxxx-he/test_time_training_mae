@@ -57,7 +57,7 @@ def _reinitialize_model(base_model, base_optimizer, base_scalar, clone_model, ar
 def train(base_model: torch.nn.Module,
           base_optimizer,
           base_scalar,
-          dataset_train, dataset_val,
+          data_loader_train, data_loader_val, dataset_len,
           device: torch.device,
           log_writer=None,
           args=None,
@@ -82,10 +82,7 @@ def train(base_model: torch.nn.Module,
     all_results = [list() for i in range(args.steps_per_example)]  # 1
     all_losses = [list() for i in range(args.steps_per_example)]
     metric_logger = misc.MetricLogger(delimiter="  ")
-    train_loader = iter(
-        torch.utils.data.DataLoader(dataset_train, batch_size=1, shuffle=False, num_workers=args.num_workers))
-    val_loader = iter(
-        torch.utils.data.DataLoader(dataset_val, batch_size=1, shuffle=False, num_workers=args.num_workers))
+
     accum_iter = args.accum_iter
     metric_logger.add_meter('lr', misc.SmoothedValue(window_size=1, fmt='{value:.6f}'))
 
@@ -93,18 +90,16 @@ def train(base_model: torch.nn.Module,
                                                         device)
     if log_writer is not None:
         print('log_dir: {}'.format(log_writer.log_dir))
-    dataset_len = len(dataset_val)
+    #dataset_len = len(dataset_val)
     epochs = 10
     for epoch in range(epochs):
         before_acc = []
         after_acc = []
         meta_train_loss = torch.tensor(0.0).to(device)
-        for data_iter_step in range(iter_start, dataset_len):
-            val_data = next(val_loader)
-            (test_samples, test_label) = val_data
-            test_samples = test_samples.to(device, non_blocking=True)[0]
-            #test_label = test_label.to(device, non_blocking=True)
-            test_label = torch.LongTensor([test_label]).to(args.device, non_blocking=True)
+        for data_iter_step, (samples, labels) in enumerate(data_loader_train):
+            (test_samples, test_label) = samples, labels
+            test_samples = test_samples.to(device, non_blocking=True)
+            test_label = test_label.to(device, non_blocking=True)
             pseudo_labels = None
             with torch.no_grad():
                 loss_dict2, _, _, pred2 = model(test_samples, target=test_label, mask_ratio=0, reconstruct=False)
@@ -115,16 +110,16 @@ def train(base_model: torch.nn.Module,
             #print("acc before meta: ", acc)
             #meta
             meta_train_accuracy = 0.0
-            meta_train_loss = 0.0
+            # meta_train_loss = 0.0
+            meta_train_loss = torch.tensor(0.0).to(device)
             for step_per_example in range(args.steps_per_example * accum_iter):  # 1*1 run only once
                 #inner
-                train_data = next(train_loader)
+                #train_data = next(train_loader)
                 # Train data are 2 values [image, class]
                 mask_ratio = args.mask_ratio
-                samples, _ = train_data
-                targets_rot, samples_rot = None, None
-                samples = samples.to(device, non_blocking=True)[
-                    0]  # index [0] becuase the data is batched to have size 1.
+                #samples, _ = train_data
+                #targets_rot, samples_rot = None, None
+                samples = samples.to(device, non_blocking=True) # index [0] becuase the data is batched to have size 1.
                 loss_dict, _, _, _ = model(samples, target=None, mask_ratio=mask_ratio)
                 loss = torch.stack([loss_dict[l] for l in loss_dict]).sum()
                 loss_value = loss.item()
@@ -161,7 +156,7 @@ def train(base_model: torch.nn.Module,
                             metric_logger.update(loss=loss_value)
                         all_results[step_per_example // accum_iter].append(acc1)
                         model.train()
-            meta_train_loss += loss_d
+            meta_train_loss += torch.stack([loss_d[l] for l in loss_d]).sum()
             if data_iter_step % 1 == 1:
                 print('step: {}, acc {} rec-loss {}'.format(data_iter_step, np.mean(all_results[-1]), loss_value))
             if data_iter_step % 500 == 499 or (data_iter_step == dataset_len - 1):
@@ -186,8 +181,8 @@ def train(base_model: torch.nn.Module,
             print(args.output_dir)
             print('Iteration:', epoch, 'Meta Train Loss', meta_train_loss)
             misc.save_model(
-                args=args, model=model, model_without_ddp=model, optimizer=self.optimizer,
-                loss_scaler=loss_scaler_out, epoch=epoch)
+                args=args, model=model, model_without_ddp=model, optimizer=base_optimizer,
+                loss_scaler=loss_scaler, epoch=epoch)
     save_accuracy_results(args)
     # gather the stats from all processes
     try:

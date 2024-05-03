@@ -56,13 +56,15 @@ def train_one_epoch(model: torch.nn.Module,
 
         with torch.cuda.amp.autocast():
             loss_dict, _, _, output = model(samples, mixed_targets, mask_ratio=0)
+            # print(output)
+            # print("--------------")
             if criterion is not None:
                 loss = criterion(output, mixed_targets)
             else:
                 loss = loss_dict['classification']
            
         with torch.no_grad():
-            acc1, acc5 = accuracy(output, targets, topk=(1, 5))
+            acc1, acc5 = accuracy(output, targets, topk=(1, 2)) #(1,5)
             metric_logger.meters['acc1'].update(acc1.item(), n=samples.shape[0])
             metric_logger.meters['acc5'].update(acc5.item(), n=samples.shape[0])
         loss_value = loss.item()
@@ -75,6 +77,7 @@ def train_one_epoch(model: torch.nn.Module,
         loss_scaler(loss, optimizer, clip_grad=max_norm,
                     parameters=model.parameters(), create_graph=False,
                     update_grad=(data_iter_step + 1) % accum_iter == 0)
+        #back propagation and update
         if (data_iter_step + 1) % accum_iter == 0:
             optimizer.zero_grad()
 
@@ -123,7 +126,7 @@ def evaluate(data_loader, model, device):
         with torch.cuda.amp.autocast():
             loss_dict, _, _, output = model(images, target, mask_ratio=0)
 
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+        acc1, acc5 = accuracy(output, target, topk=(1, 2))
 
         batch_size = images.shape[0]
         metric_logger.update(loss=loss_dict['classification'].item())

@@ -24,8 +24,10 @@ def accuracy(output, target, topk=(1,)):
     # output is (B, classes)
     # target is (B)
     maxk = max(topk)
+    #print(maxk)
+    #print(output.size(), target.size())
     batch_size = target.size(0)
-    _, pred = output.topk(maxk, 1, True, True)
+    _, pred = output.topk(maxk, 1, True, True)  #
     pred = pred.t()
     correct = pred.eq(target.reshape(1, -1).expand_as(pred))
     return [correct[:k].reshape(-1).float().sum(0) * 100. / batch_size for k in topk]
@@ -49,18 +51,30 @@ def train_one_epoch(model: torch.nn.Module,
         print('log_dir: {}'.format(log_writer.log_dir))
 
     for data_iter_step, (samples, labels) in enumerate(metric_logger.log_every(data_loader, args.print_freq, header)):
-
+        #print(labels) #labels == #batch
+        print("--------")
         # we use a per iteration (instead of per epoch) lr scheduler
         if data_iter_step % accum_iter == 0:
             lr_sched.adjust_learning_rate(optimizer, data_iter_step / len(data_loader) + epoch, args)
 
         samples = samples.to(device, non_blocking=True)
-        labels = labels.to(device, non_blocking=True)
-
+        labels = labels.to(device, non_blocking=True)  #
+        # print(samples)
         with torch.cuda.amp.autocast():
             loss_dict, _, _, pred = model(samples, target=None, mask_ratio=args.mask_ratio)
-        
+            # loss_dict, pred, _, _ = model(samples, target=None, mask_ratio=args.mask_ratio) ##change
+            # loss_dict, _, _, _ = model(samples, target=None, mask_ratio=args.mask_ratio)
+            # loss_dict, _, _ = model(samples, target=None, mask_ratio=args.mask_ratio)
+
+        # print(model)
+        # print("pred------------")
+        # print(pred.shape)  #[N, L, p*p*3] 64 196 16*16*3
+        # print(pred[0].shape)
+        # print("pred------------")
+        # print(labels.shape) #N
+        # print("labels------------") ## output is (B, classes) # target is (B)
         loss = loss_dict["mae"]
+        # loss = loss_dict
         loss_value = loss.item()
 
         if not math.isfinite(loss_value):
@@ -68,19 +82,31 @@ def train_one_epoch(model: torch.nn.Module,
             sys.exit(1)
 
         loss /= accum_iter
+
         loss_scaler(loss, optimizer, parameters=model.parameters(),
                     update_grad=(data_iter_step + 1) % accum_iter == 0)
+        # this is loss.backward and optimizer.step()  更新所有参数 反向传播求梯度
+
+        # for name, param in model.named_parameters():
+        #     if param.grad is None:
+        #         print(name)
+
         if (data_iter_step + 1) % accum_iter == 0:
             optimizer.zero_grad()
 
         torch.cuda.synchronize()
-        
-        metric_logger.update(**{k:v.item() for k,v in loss_dict.items()})
+
+        metric_logger.update(**{k: v.item() for k, v in loss_dict.items()})
         with torch.no_grad():
-            (acc1, acc5) = accuracy(pred, labels, topk=(1, 5))
-            metric_logger.update(top1_acc=acc1)
-            metric_logger.update(top5_acc=acc5)
-            
+            # if pred is None:  #
+            #     batch_size = labels.size(0)
+            #     pred = torch.zeros(batch_size, 2)  #2 IS NUM_CLASS
+            # print(type(labels)) #TENSOR
+            if pred is not None:
+                (acc1, acc5) = accuracy(pred, labels,topk=(1, 5))  # topk=(1, 5)  # # output is (B, classes) # target is (B)
+                metric_logger.update(top1_acc=acc1)
+                metric_logger.update(top5_acc=acc5)
+
         lr = optimizer.param_groups[0]["lr"]
         metric_logger.update(lr=lr)
 
@@ -119,16 +145,23 @@ def evaluate(data_loader, model, device):
         with torch.cuda.amp.autocast():
             loss_dict, _, _, output = model(images, target, mask_ratio=0)
             loss = criterion(output, target)
-
-        acc1, acc5 = accuracy(output, target, topk=(1, 5))
+            # print(output)
+            # print(target)
+            # print("---------------")
+        if output is not None:
+            acc1, acc5 = accuracy(output, target, topk=(1, 2)) #(1,5)
 
         batch_size = images.shape[0]
         metric_logger.update(loss=loss.item())
-        metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
-        metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
+        if output is not None:
+            metric_logger.meters['acc1'].update(acc1.item(), n=batch_size)
+            metric_logger.meters['acc5'].update(acc5.item(), n=batch_size)
     # gather the stats from all processes
     metric_logger.synchronize_between_processes()
-    print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
-          .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
+    if metric_logger.acc1 is not None:
+        print('* Acc@1 {top1.global_avg:.3f} Acc@5 {top5.global_avg:.3f} loss {losses.global_avg:.3f}'
+              .format(top1=metric_logger.acc1, top5=metric_logger.acc5, losses=metric_logger.loss))
+    else:
+        print('loss global avg', metric_logger.loss)
 
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}

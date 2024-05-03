@@ -20,6 +20,7 @@ from einops import repeat
 import tqdm
 import os.path
 
+
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE testing.', add_help=False)
     # Model parameters
@@ -54,7 +55,7 @@ def get_args_parser():
     parser.add_argument('--head_type', default='linear',
                         help='Head type - linear or vit_head')
     parser.add_argument('--num_workers', default=10, type=int)
-    
+
     return parser
 
 
@@ -67,12 +68,12 @@ def main(args):
         transforms.Normalize(mean=[0.676, 0.566, 0.664], std=[0.227, 0.253, 0.217])])
     # dataset_val = datasets.ImageFolder(args.data_path, transform=transform_val)
     dataset_val = torchvision.datasets.PCAM(root="/home/h_haoy/Myproject/Myprojectpcam/Pcam", split='test',
-                                              transform=transform_val, download=False)
-    #dataset_val = datasets.ImageFolder('/home/h_haoy/Myproject/Pcam/testttt', transform=transform_val)
+                                            transform=transform_val, download=False)
+    # dataset_val = datasets.ImageFolder('/home/h_haoy/Myproject/Pcam/testttt', transform=transform_val)
+    val_loader = iter(torch.utils.data.DataLoader(dataset_val, batch_size=1, shuffle=False, num_workers=6))
     classes = 2
 
-    
-    print(f'Using dataset {args.data_path} with {len(dataset_val)}') 
+    print(f'Using dataset {args.data_path} with {len(dataset_val)}')
     model, _, _ = load_combined_model(args, classes)
     _ = model.to(args.device)
     all_acc = []
@@ -81,14 +82,19 @@ def main(args):
     data_len = len(dataset_val)
     for index in range(data_len):
         # Get the samples:
-        current_idx = index
-        samples, labels = dataset_val[current_idx]
-        samples = samples.to(args.device, non_blocking=True).unsqueeze(0)
-        labels = torch.LongTensor([labels]).to(args.device, non_blocking=True)
+        # current_idx = index
+        # samples, labels = dataset_val[current_idx]
+        val_data = next(val_loader)
+        (samples, labels) = val_data
+        samples = samples.to(args.device, non_blocking=True)[0]
+        labels = labels.to(args.device, non_blocking=True)
+        # samples = samples.to(args.device, non_blocking=True).unsqueeze(0)
+        # labels = torch.LongTensor([labels]).to(args.device, non_blocking=True)
         with torch.no_grad():
             loss_dict, _, _, pred = model(samples, target=labels, mask_ratio=0)
-            #print(pred)
-            acc1 = (stats.mode(pred.argmax(axis=1).detach().cpu().numpy()).mode[0] == labels[0].cpu().detach().numpy()) * 100.
+            # print(pred)
+            acc1 = (stats.mode(pred.argmax(axis=1).detach().cpu().numpy()).mode[0] == labels[
+                0].cpu().detach().numpy()) * 100.
         all_acc.append(acc1)
         all_losses.append(float(loss_dict['classification'].detach().cpu().numpy()))
         # if data_iter_step % 50 == 1:
@@ -116,8 +122,8 @@ def main(args):
         f.write(f'{np.mean(all_acc)} {np.mean(all_losses)}\n')
     with open(os.path.join(args.output_dir, 'accuracy.npy'), 'wb') as f:
         np.save(f, np.array(all_acc))
-        
-    
+
+
 if __name__ == '__main__':
     args = get_args_parser()
     args = args.parse_args()

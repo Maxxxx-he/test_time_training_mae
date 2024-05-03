@@ -101,8 +101,8 @@ def train_on_test(base_model: torch.nn.Module,
                                                          classifier_num_heads=classifier_num_heads,
                                                          rotation_prediction=False)
     # Intialize the model for the current run
-    all_results = [list() for i in range(args.steps_per_example)]  #1
-    before_results = [list() for i in range(args.steps_per_example)]  # 1
+    all_results = []  #1
+    before_results = []  # 1
     all_losses = [list() for i in range(args.steps_per_example)]
     metric_logger = misc.MetricLogger(delimiter="  ")
 
@@ -122,24 +122,27 @@ def train_on_test(base_model: torch.nn.Module,
         test_samples = test_samples.to(device, non_blocking=True).unsqueeze(0)
         test_label = torch.LongTensor([test_label]).to(args.device, non_blocking=True)
         pseudo_labels = None
+        samples = samples.to(device, non_blocking=True)  # index [0] becuase the data is batched to have size 1.
+        # print("shape: ", samples.shape)
+        samples = samples.unsqueeze(0)
+        model.eval()
         with torch.no_grad():
             _, _, _, pred1 = model(test_samples, target=test_label, mask_ratio=0)
             #print(pred)
             acc2 = (stats.mode(pred1.argmax(axis=1).detach().cpu().numpy()).mode[0] == test_label[
                 0].cpu().detach().numpy()) * 100.
         before_results.append(acc2)
-        samples = samples.to(device, non_blocking=True)  # index [0] becuase the data is batched to have size 1.
-        #print("shape: ", samples.shape)
-        samples = samples.unsqueeze(0)
+        model.train()
         #print("shape: ", samples.shape)
         # Test time training:
+        max = 0
         for step_per_example in range(args.steps_per_example * 1):  #1*1
             # train_data = next(train_loader)
             # Train data are 2 values [image, class]
             mask_ratio = args.mask_ratio
             # samples, _ = train_data
             targets_rot, samples_rot = None, None
-            loss_dict, _, _, _ = model(samples, target=None, mask_ratio=mask_ratio)
+            loss_dict, _, _, _ = model(test_samples, target=None, mask_ratio=mask_ratio)
             loss = torch.stack([loss_dict[l] for l in loss_dict]).sum()
             loss_value = loss.item()
             #loss /= accum_iter
@@ -153,29 +156,21 @@ def train_on_test(base_model: torch.nn.Module,
             optimizer.zero_grad()
             lr = optimizer.param_groups[0]["lr"]
             # Test:
-            if (1 + 1) % 1 == 0:
-                with torch.no_grad():
-                    model.eval()
-                    all_pred = []
-                    loss_d, _, _, pred = model(test_samples, test_label, mask_ratio=0, reconstruct=False)
-                    all_pred.extend(list(pred.argmax(axis=1).detach().cpu().numpy()))
-                    acc1 = (stats.mode(pred.argmax(axis=1).detach().cpu().numpy()).mode[0] == test_label[
-                        0].cpu().detach().numpy()) * 100.
-                    all_results.append(acc1)
-                    model.train()
-        if index % 20 == 1:
-            print('step: {}, before acc {}'.format(index, np.mean(before_results[-20:])))
-            print('step: {}, acc {} rec-loss {}'.format(index, np.mean(all_results[-20:]), loss_value))
-        # if index % 500 == 499 or (index == dataset_len - 1):
-        #     with open(os.path.join(args.output_dir, f'results_{index}.npy'), 'wb') as f:
-        #         np.save(f, np.array(all_results))
-        #     with open(os.path.join(args.output_dir, f'losses_{index}.npy'), 'wb') as f:
-        #         np.save(f, np.array(all_losses))
-        #     all_results = [list() for i in range(args.steps_per_example)]
-        #     all_losses = [list() for i in range(args.steps_per_example)]
+            with torch.no_grad():
+                model.eval()
+                all_pred = []
+                loss_d, _, _, pred = model(test_samples, test_label, mask_ratio=0, reconstruct=False)
+                all_pred.extend(list(pred.argmax(axis=1).detach().cpu().numpy()))
+                acc1 = (stats.mode(pred.argmax(axis=1).detach().cpu().numpy()).mode[0] == test_label[0].cpu().detach().numpy()) * 100.
+                all_results.append(acc1)
+                model.train()
+        if index % 50 == 1:
+            print('step: {}, before acc {}, before total acc {}'.format(index, np.mean(before_results[-50:]), np.mean(before_results[:])))
+            print('step: {}, acc {} rec-loss {}, total acc {}'.format(index, np.mean(all_results[-20 * 50:]), loss_value, np.mean(all_results[:])))
+
         model, optimizer, loss_scaler = _reinitialize_model(base_model, base_optimizer, base_scalar, clone_model, args,
                                                             device)
-    save_accuracy_results(args)
+    # save_accuracy_results(args)
     print('Saving to', os.path.join(args.output_dir, 'accuracy.txt'))
     with open(os.path.join(args.output_dir, 'accuracy.txt'), 'a') as f:
         f.write(f'{str(args)}\n')

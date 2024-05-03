@@ -157,23 +157,29 @@ def main(args):
     # linear probe: weak augmentation
     # Imagenet
     transform_train = transforms.Compose([
-            transforms.RandomResizedCrop(args.input_size, interpolation=3),  # 3 is bicubic
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+        # transforms.RandomResizedCrop(args.input_size, interpolation=3),  # 3 is bicubic
+        # transforms.RandomHorizontalFlip(),
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.676, 0.566, 0.664], std=[0.227, 0.253, 0.217])])
 
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+    #dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'train'), transform=transform_train)
+    dataset_train = torchvision.datasets.PCAM(root="/home/h_haoy/Myproject/Myprojectpcam/Pcam", split='train',
+                                              transform=transform_train, download=False)
     transform_val = transforms.Compose([
-            transforms.Resize(256, interpolation=3),
-            transforms.CenterCrop(args.input_size),
-            transforms.ToTensor(),
-            transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
-    dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
-    num_classes = 1000
+        # transforms.Resize(256, interpolation=3),
+        # transforms.CenterCrop(args.input_size),
+        transforms.Resize((224, 224)),
+        transforms.ToTensor(),
+        transforms.Normalize(mean=[0.676, 0.566, 0.664], std=[0.227, 0.253, 0.217])])
+    #dataset_val = datasets.ImageFolder(os.path.join(args.data_path, 'val'), transform=transform_val)
+    dataset_val = torchvision.datasets.PCAM(root="/home/h_haoy/Myproject/Myprojectpcam/Pcam", split='val',
+                                            transform=transform_val, download=False)
+    num_classes = 2
     print(dataset_train)
     print(dataset_val)
 
-    
+    # criterion method
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
     if mixup_fn is not None:
@@ -197,7 +203,8 @@ def main(args):
                       'This will slightly alter validation results as extra duplicate entries are added to achieve '
                       'equal num of samples per-process.')
             sampler_val = torch.utils.data.DistributedSampler(
-                dataset_val, num_replicas=num_tasks, rank=global_rank, shuffle=True)  # shuffle=True to reduce monitor bias
+                dataset_val, num_replicas=num_tasks, rank=global_rank,
+                shuffle=True)  # shuffle=True to reduce monitor bias
         else:
             sampler_val = torch.utils.data.SequentialSampler(dataset_val)
     else:
@@ -229,11 +236,11 @@ def main(args):
     model = models_mae_shared.__dict__[args.model](
         num_classes=num_classes,
         img_size=args.input_size,
-        no_decoder=True,
-        head_type=args.head_type,
+        no_decoder=True,  #
+        head_type=args.head_type,  #
         classifier_depth=args.classifier_depth,
-        norm_pix_loss=args.norm_pix_loss,
-        drop_path_rate=args.drop_path,
+        norm_pix_loss=args.norm_pix_loss,  #
+        drop_path_rate=args.drop_path,  #
     )
 
     if args.finetune and not args.eval:
@@ -254,13 +261,13 @@ def main(args):
         print(msg)
 
         # print('Missing keys', set(msg.missing_keys))
-    
+
     # for linear prob only
     # hack: revise model's head with BN
     assert args.head_type == 'vit_head'
     for name, p in model.named_parameters():
         if not name.startswith('classifier'):
-            p.requires_grad = False
+            p.requires_grad = False  # set vit not trainable
 
     model.to(device)
 
@@ -271,7 +278,7 @@ def main(args):
     print('number of params (M): %.2f' % (n_parameters / 1.e6))
 
     eff_batch_size = args.batch_size * args.accum_iter * misc.get_world_size()
-    
+
     if args.lr is None:  # only base_lr is specified
         args.lr = args.blr * eff_batch_size / 256
 
@@ -292,7 +299,7 @@ def main(args):
     print(optimizer)
     loss_scaler = NativeScaler()
 
-    if os.path.isdir(args.output_dir):
+    if os.path.isdir(args.output_dir):  ##
         files = os.listdir(args.output_dir)
         checkpoint_files = [f for f in files if 'checkpoint-' in f]
         if len(checkpoint_files) > 0 and len(args.resume) == 0:
@@ -340,9 +347,9 @@ def main(args):
             log_writer.add_scalar('perf/test_loss', test_stats['loss'], epoch)
 
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
-                        **{f'test_{k}': v for k, v in test_stats.items()},
-                        'epoch': epoch,
-                        'n_parameters': n_parameters}
+                     **{f'test_{k}': v for k, v in test_stats.items()},
+                     'epoch': epoch,
+                     'n_parameters': n_parameters}
 
         if args.output_dir and misc.is_main_process():
             if log_writer is not None:

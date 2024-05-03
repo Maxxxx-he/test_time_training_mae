@@ -81,6 +81,8 @@ def get_args_parser():
     parser.add_argument('--seed', default=0, type=int)
     parser.add_argument('--resume', default='',
                         help='resume from checkpoint')
+    parser.add_argument('--verbose', action='store_true')
+    parser.set_defaults(verbose=False)
 
     parser.add_argument('--start_epoch', default=0, type=int, metavar='N',
                         help='start epoch')
@@ -176,7 +178,9 @@ def main(args):
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.676, 0.566, 0.664], std=[0.227, 0.253, 0.217])])
 
-    dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'testttt'), transform=transform_train)
+    #dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'testttt'), transform=transform_train)
+    dataset_train = torchvision.datasets.PCAM(root="/home/h_haoy/Myproject/Myprojectpcam/Pcam", split='train',
+                                              transform=transform_train, download=False)
     num_classes = 2
     model, optimizer, loss_scalar = load_model(args, 2)
     print("Model = %s" % str(model))
@@ -194,9 +198,27 @@ def main(args):
     print("accumulate grad iterations: %d" % args.accum_iter)
     print("effective batch size: %d" % eff_batch_size)
 
+    sampler_train = torch.utils.data.RandomSampler(dataset_train)
+    #sampler_val = torch.utils.data.SequentialSampler(dataset_val)
+
+    data_loader_train = torch.utils.data.DataLoader(
+        dataset_train, sampler=sampler_train,
+        batch_size=args.batch_size,
+        num_workers=args.num_workers,
+        pin_memory=args.pin_mem,
+        drop_last=True,
+    )
+    # data_loader_val = torch.utils.data.DataLoader(
+    #     dataset_val, sampler=sampler_val,
+    #     batch_size=args.batch_size,
+    #     num_workers=args.num_workers,
+    #     pin_memory=args.pin_mem,
+    #     drop_last=False
+    # )
+
     start_time = time.time()
     test_stats = train(
-        model, optimizer, loss_scalar, dataset_train, dataset_train,
+        model, optimizer, loss_scalar, data_loader_train, data_loader_train, len(dataset_train),
         device,
         log_writer=None,
         args=args,

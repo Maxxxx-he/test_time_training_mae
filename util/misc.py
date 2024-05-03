@@ -264,7 +264,7 @@ class NativeScalerWithGradNormCount:
             else:
                 self._scaler.unscale_(optimizer)
                 norm = get_grad_norm_(parameters)
-            self._scaler.step(optimizer)
+            self._scaler.step(optimizer) #update paras
             self._scaler.update()
         else:
             norm = None
@@ -294,6 +294,7 @@ def get_grad_norm_(parameters, norm_type: float = 2.0) -> torch.Tensor:
 
 def save_model(args, epoch, model, model_without_ddp, optimizer=None, loss_scaler=None):
     output_dir = Path(args.output_dir)
+    print(output_dir)
     epoch_name = str(epoch)
     if loss_scaler is not None:
         checkpoint_path = output_dir / ('checkpoint-%s.pth' % epoch_name)
@@ -305,7 +306,7 @@ def save_model(args, epoch, model, model_without_ddp, optimizer=None, loss_scale
             'args': args,
         }
         save_on_master(to_save, checkpoint_path)
-
+        print(1)
         if epoch + 1 == args.epochs:
             checkpoint_path = output_dir / 'checkpoint-final.pth'
             save_on_master(to_save, checkpoint_path)
@@ -316,6 +317,7 @@ def save_model(args, epoch, model, model_without_ddp, optimizer=None, loss_scale
     last_checkpoint_path = output_dir / ('checkpoint-%s.pth' % str(epoch - 2))
     if is_main_process() and last_checkpoint_path.is_file():
         os.remove(str(last_checkpoint_path))
+        print(3)
 
 
 def load_model(args, model_without_ddp, optimizer, loss_scaler):

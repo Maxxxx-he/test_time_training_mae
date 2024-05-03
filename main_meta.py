@@ -34,7 +34,7 @@ from engine_meta import maml_learner
 
 def get_args_parser():
     parser = argparse.ArgumentParser('Meta training', add_help=False)
-    parser.add_argument('--batch_size', default=64, type=int,
+    parser.add_argument('--batch_size', default=16, type=int,
                         help='Batch size per GPU (effective batch size is batch_size * accum_iter * # gpus')
     parser.add_argument('--epochs', default=90, type=int)
     parser.add_argument('--accum_iter', default=1, type=int,
@@ -84,7 +84,7 @@ def get_args_parser():
                         help='Perform evaluation only')
     parser.add_argument('--dist_eval', action='store_true', default=False,
                         help='Enabling distributed evaluation (recommended during training for faster monitor')
-    parser.add_argument('--num_workers', default=6, type=int)
+    parser.add_argument('--num_workers', default=4, type=int)
     parser.add_argument('--pin_mem', action='store_true',
                         help='Pin CPU memory in DataLoader for more efficient (sometimes) transfer to GPU.')
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
@@ -105,7 +105,7 @@ def get_args_parser():
     return parser
 
 
-def load_model(args, num_classes):
+def load_model(args, num_classes: int = 2):
     classifier_embed_dim = 768
     classifier_depth = 12
     classifier_num_heads = 12
@@ -168,7 +168,7 @@ def main(args):
     transform_train = transforms.Compose([
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
-        transforms.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225])])
+        transforms.Normalize(mean=[0.676, 0.566, 0.664], std=[0.227, 0.253, 0.217])])
 
     dataset_train = datasets.ImageFolder(os.path.join(args.data_path, 'testttt'), transform=transform_train)
 
@@ -211,8 +211,8 @@ def main(args):
     model, optimizer, loss_scaler = load_model(args, 2)
 
     # test
-    maml = l2l.algorithms.MAML(model, lr=0.01)
-    print(maml)
+    # maml = l2l.algorithms.MAML(model, lr=0.01)
+    # print(maml)
 
     for name, p in model.named_parameters():
         p.requires_grad = True
@@ -227,9 +227,9 @@ def main(args):
     start_time = time.time()
     max_accuracy = 0.0
 
-    learner = maml_learner(maml, dataset, ways=1, args=args, optimizer=optimizer, loss_scaler=loss_scaler)
-    save_path = args.output_dir
-    learner.train(save_path, shots=1)
+    learner = maml_learner(model, dataset, ways=1, args=args, optimizer=optimizer, loss_scaler=loss_scaler)
+    learner.train()
+    learner.test()
 
 
 # meta_learning
