@@ -30,7 +30,7 @@ import os.path
 import numpy as np
 from scipy import stats
 import util.misc as misc
-
+from util.misc import NativeScalerWithGradNormCount as NativeScaler
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE testing.', add_help=False)
@@ -78,6 +78,39 @@ def get_args_parser():
 
     return parser
 
+def get_parameters_from_args(model, args):
+    if args.finetune_mode == 'encoder':
+        for name, p in model.named_parameters():
+            if name.startswith('decoder'):
+                p.requires_grad = True  #False
+        parameters = [p for p in model.parameters() if p.requires_grad]
+    elif args.finetune_mode == 'all':
+        parameters = model.parameters()
+    elif args.finetune_mode == 'encoder_no_cls_no_msk':
+        for name, p in model.named_parameters():
+            if name.startswith('decoder') or name == 'cls_token' or name == 'mask_token':
+                p.requires_grad = False
+        parameters = [p for p in model.parameters() if p.requires_grad]
+    return parameters
+
+def _reinitialize_model(base_model, base_optimizer, base_scalar, clone_model, args, device):
+    clone_model.load_state_dict(copy.deepcopy(base_model.state_dict()))
+    clone_model.train(True)
+    clone_model.to(device)
+    if args.optimizer_type == 'sgd':
+        optimizer = torch.optim.SGD(get_parameters_from_args(clone_model, args), lr=args.lr,
+                                    momentum=args.optimizer_momentum)
+    elif args.optimizer_type == 'adam':
+        optimizer = torch.optim.Adam(get_parameters_from_args(clone_model, args), lr=args.lr, betas=(0.9, 0.95))
+    else:
+        assert args.optimizer_type == 'adam_w'
+        optimizer = torch.optim.AdamW(get_parameters_from_args(clone_model, args), lr=args.lr, betas=(0.9, 0.95))
+    optimizer.zero_grad()
+    loss_scaler = NativeScaler()
+    # if args.load_loss_scalar:
+    #     loss_scaler.load_state_dict(base_scalar.state_dict())
+    return clone_model, optimizer, loss_scaler
+
 
 def get_prameters_from_args(model, args):
     if args.finetune_mode == 'encoder':
@@ -96,97 +129,105 @@ def get_prameters_from_args(model, args):
 
 
 def main(args):
-    transform_val = transforms.Compose([
+    transform_train = transforms.Compose([
         # transforms.Resize(256, interpolation=3),
         # transforms.CenterCrop(args.input_size),
         transforms.Resize((224, 224)),
         transforms.ToTensor(),
         transforms.Normalize(mean=[0.676, 0.566, 0.664], std=[0.227, 0.253, 0.217])])
     # dataset_val = datasets.ImageFolder(args.data_path, transform=transform_val)
-    dataset_val = torchvision.datasets.PCAM(root="/home/h_haoy/Myproject/Myprojectpcam/Pcam", split='test',
-                                            transform=transform_val, download=False)
+    dataset_train = torchvision.datasets.PCAM(root="/home/h_haoy/Myproject/Myprojectpcam/Pcam", split='test',
+                                              transform=transform_train, download=False)
     # dataset_val = datasets.ImageFolder('/home/h_haoy/Myproject/Pcam/testttt', transform=transform_val)
     classes = 2
 
-    print(f'Using dataset {args.data_path} with {len(dataset_val)}')
+    print(f'Using dataset {args.data_path} with {len(dataset_train)}')
     model, optimizer, scaler = load_combined_model(args, classes)
     optimizer = torch.optim.SGD(get_prameters_from_args(model, args), lr=args.lr,
                                 momentum=args.optimizer_momentum)
     _ = model.to(args.device)
+    data_len = len(dataset_train)
+    # optimizer = None
+    meta_loss = 0
     all_acc = []
     all_losses = []
-    all_results = []
-    last_results = []
-    model.eval()
-    mean_results = []
-    data_len = len(dataset_val)
-    # optimizer = None
+    all_acc2 = []
+    all_losses2 = []
+
+    classifier_embed_dim = 768
+    classifier_depth = 12
+    classifier_num_heads = 12
+    clone_model = models_mae_shared.__dict__[args.model](num_classes=classes, head_type=args.head_type,
+                                                         norm_pix_loss=args.norm_pix_loss,
+                                                         classifier_depth=classifier_depth,
+                                                         classifier_embed_dim=classifier_embed_dim,
+                                                         classifier_num_heads=classifier_num_heads,
+                                                         rotation_prediction=False)
+
+    model2, optimizer2, loss_scaler2 = _reinitialize_model(model, optimizer, scaler, clone_model, args, args.device)
+    # while meta_loss >= 0.01:
+    #     meta_loss = 0
     for index in range(data_len):
         # Get the samples:
         current_idx = index
-        samples, labels = dataset_val[current_idx]
+        samples, labels = dataset_train[current_idx]
         samples = samples.to(args.device, non_blocking=True).unsqueeze(0)
         labels = torch.LongTensor([labels]).to(args.device, non_blocking=True)
+        
         with torch.no_grad():
             loss_dict, _, _, pred = model(samples, target=labels, mask_ratio=0)
             # print(pred)
             acc1 = (stats.mode(pred.argmax(axis=1).detach().cpu().numpy()).mode[0] == labels[
                 0].cpu().detach().numpy()) * 100.
+            loss_dict2, _, _, pred2 = model2(samples, target=labels, mask_ratio=0)
+            # print(pred)
+            acc2 = (stats.mode(pred2.argmax(axis=1).detach().cpu().numpy()).mode[0] == labels[
+                0].cpu().detach().numpy()) * 100.
         all_acc.append(acc1)
         all_losses.append(float(loss_dict['classification'].detach().cpu().numpy()))
+        all_acc2.append(acc2)
+        all_losses2.append(float(loss_dict2['classification'].detach().cpu().numpy()))
 
-        #meta
-        max1 = 0
-        iter = []
-        for step_per_example in range(args.steps_per_example * 1):
-            model.train()
-            mask_ratio = args.mask_ratio
-            # samples, _ = train_data
-            targets_rot, samples_rot = None, None
-            loss_dict, _, _, _ = model(samples, target=None, mask_ratio=mask_ratio)
-            loss = torch.stack([loss_dict[l] for l in loss_dict]).sum()
-            loss_value = loss.item()
-            # loss /= accum_iter
-            if not math.isfinite(loss_value):
-                print("Loss is {}, stopping training".format(loss_value))
-                sys.exit(1)
-            #print(scaler)
-            scaler(loss, optimizer, parameters=model.parameters(),
-                   update_grad=(1 + 1) % 1 == 0)
+        #
+        # #meta
+        #
+        # model.train()
+        # mask_ratio = args.mask_ratio
+        # # samples, _ = train_data
+        # targets_rot, samples_rot = None, None
+        # loss_dict, _, _, _ = model(samples, target=None, mask_ratio=mask_ratio)
+        # loss = torch.stack([loss_dict[l] for l in loss_dict]).sum()
+        # loss_value = loss.item()
+        # # loss /= accum_iter
+        # if not math.isfinite(loss_value):
+        #     print("Loss is {}, stopping training".format(loss_value))
+        #     sys.exit(1)
+        # #print(scaler)
+        # scaler(loss, optimizer, parameters=model.parameters(),
+        #        update_grad=(1 + 1) % 1 == 0)
+        #
+        # #testing
+        # with torch.no_grad():
+        #     model.eval()
+        #     all_pred = []
+        #     loss_d, _, _, _ = model(samples, labels, mask_ratio=0, reconstruct=False)
+        #     loss_test = torch.stack([loss_d[l] for l in loss_d]).sum()
+        #     loss_test_meta = loss_test.item()
+        #     model.train()
+        # meta_loss += loss_test_meta
 
-            #testing
-            with torch.no_grad():
-                model.eval()
-                all_pred = []
-                loss_d, _, _, pred1 = model(samples, labels, mask_ratio=0, reconstruct=False)
-                #all_pred.extend(list(pred1.argmax(axis=1).detach().cpu().numpy()))
-                acc2 = (stats.mode(pred1.argmax(axis=1).detach().cpu().numpy()).mode[0] == labels[
-                    0].cpu().detach().numpy()) * 100.
-                if max1 < acc2:
-                    max1 = acc2
-                model.train()
-                iter.append(acc2)
-                if step_per_example == args.steps_per_example-1:
-                    last_results.append(acc2)
-
-        all_results.append(max1)
-        mean_results.append(np.mean(iter))
-        #print(iter)
-
-        # if data_iter_step % 50 == 1:
-        #     print('step: {}, before {}'.format(data_iter_step, np.mean(before_results[-1])))
-        #     print('step: {}, acc {} rec-loss {}'.format(data_iter_step, np.mean(all_results[-1]), loss_value))
         if index % 50 == 1:
-            print("ep:, before_acc, max_acc, last_acc, mean_acc", index, np.mean(all_acc[:]), np.mean(all_results[:]), np.mean(last_results[:]), np.mean(mean_results[:]))
-            print("loss", np.mean(all_losses[-1000:]))
-        model, optimizer, scaler = load_combined_model(args, classes)
-        optimizer = torch.optim.SGD(get_prameters_from_args(model, args), lr=args.lr,
-                                    momentum=args.optimizer_momentum)
-        _ = model.to(args.device)
+            print('step: {}, before {},loss{}'.format(index, np.mean(all_acc[-50:]), np.mean(all_losses[:])))
+            print('step: {}, after {},loss{}'.format(index, np.mean(all_acc2[-50:]), np.mean(all_losses2[:])))
+            #print("loss", np.mean(all_losses[-1000:]))
+        #model, optimizer, scaler = load_combined_model(args, classes)
+        #optimizer = torch.optim.SGD(get_prameters_from_args(model, args), lr=args.lr,momentum=args.optimizer_momentum)
+        #_ = model.to(args.device)
+
     print('Saving to', os.path.join(args.output_dir, 'accuracy.txt'))
     with open(os.path.join(args.output_dir, 'accuracy.txt'), 'a') as f:
         f.write(f'{str(args)}\n')
-        f.write(f'{np.mean(all_acc)} {np.mean(all_results)} {np.mean(last_results)} {np.mean(mean_results)} {np.mean(all_losses)}\n')
+        f.write(f'{np.mean(all_acc)} {np.mean(all_losses)}\n')
     with open(os.path.join(args.output_dir, 'accuracy.npy'), 'wb') as f:
         np.save(f, np.array(all_results))
 

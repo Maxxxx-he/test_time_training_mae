@@ -20,6 +20,16 @@ from einops import repeat
 import tqdm
 import os.path
 
+import math
+import sys
+from typing import Iterable
+import copy
+import torch
+import models_mae_shared
+import os.path
+import numpy as np
+from scipy import stats
+import util.misc as misc
 
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE testing.', add_help=False)
@@ -74,8 +84,9 @@ def main(args):
     classes = 2
 
     print(f'Using dataset {args.data_path} with {len(dataset_val)}')
-    model, _, _ = load_combined_model(args, classes)
+    model, optimizer, scaler = load_combined_model(args, classes)
     _ = model.to(args.device)
+    optimizer = torch.optim.SGD(get_prameters_from_args(model, args), lr=args.lr,momentum=args.optimizer_momentum)
     all_acc = []
     all_losses = []
     model.eval()
@@ -86,9 +97,10 @@ def main(args):
         # samples, labels = dataset_val[current_idx]
         val_data = next(val_loader)
         (samples, labels) = val_data
-        samples = samples.to(args.device, non_blocking=True)[0]
+        samples = samples.to(args.device, non_blocking=True)
         labels = labels.to(args.device, non_blocking=True)
         # samples = samples.to(args.device, non_blocking=True).unsqueeze(0)
+        print(samples.size())
         # labels = torch.LongTensor([labels]).to(args.device, non_blocking=True)
         with torch.no_grad():
             loss_dict, _, _, pred = model(samples, target=labels, mask_ratio=0)
@@ -100,27 +112,27 @@ def main(args):
         # if data_iter_step % 50 == 1:
         #     print('step: {}, before {}'.format(data_iter_step, np.mean(before_results[-1])))
         #     print('step: {}, acc {} rec-loss {}'.format(data_iter_step, np.mean(all_results[-1]), loss_value))
-        mask_ratio = args.mask_ratio
+        mask_ratio = 0.75
         # samples, _ = train_data
         targets_rot, samples_rot = None, None
-        loss_dict, _, _, _ = model(test_samples, target=None, mask_ratio=mask_ratio)
-        loss = torch.stack([loss_dict[l] for l in loss_dict]).sum()
+        loss_dict1, _, _, _ = model(samples, target=None, mask_ratio=mask_ratio)
+        loss = torch.stack([loss_dict1[l] for l in loss_dict1]).sum()
         loss_value = loss.item()
         # loss /= accum_iter
         if not math.isfinite(loss_value):
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
-        loss_scaler(loss, optimizer, parameters=model.parameters(),
+        scaler(loss, optimizer, parameters=model.parameters(),
                     update_grad=(1 + 1) % 1 == 0)
 
         if index % 50 == 1:
             print("ep:, acc", index, np.mean(all_acc[-1000:]))
             print("loss", np.mean(all_losses[-1000:]))
     print('Saving to', os.path.join(args.output_dir, 'accuracy.txt'))
-    with open(os.path.join(args.output_dir, 'accuracy.txt'), 'a') as f:
+    with open(os.path.join(args.output_dir, 'accuracy1.txt'), 'a') as f:
         f.write(f'{str(args)}\n')
         f.write(f'{np.mean(all_acc)} {np.mean(all_losses)}\n')
-    with open(os.path.join(args.output_dir, 'accuracy.npy'), 'wb') as f:
+    with open(os.path.join(args.output_dir, 'accuracy1.npy'), 'wb') as f:
         np.save(f, np.array(all_acc))
 
 
